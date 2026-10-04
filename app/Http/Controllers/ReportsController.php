@@ -243,6 +243,7 @@ class ReportsController extends Controller
                 // Prepare ship order details
                 $shipOrdersDetails[] = [
                     'order_number' => $shipOrder->order_number,
+                    'order_id' => $shipOrder->id,
                     'order_type' => $shipOrder->order_type,
                     'orderBooking' => $shipOrder->shipBookings->map(function ($booking) {
                         return [
