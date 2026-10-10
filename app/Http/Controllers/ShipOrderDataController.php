@@ -33,6 +33,8 @@ class ShipOrderDataController extends Controller
             'shipBookings.clearanceData',
             'shipContactData',
             'treasuries',
+            'orderReceipts.items',
+            'orderReceipts.client',
             'operatingOrder'
         ]);
 
@@ -281,7 +283,9 @@ class ShipOrderDataController extends Controller
             'shipBookings.shipContainersDetails.assignmentContainerPivots',
             'shipBookings.clearanceData',
             'shipContactData',
-            'treasuries'
+            'treasuries',
+            'orderReceipts.items',
+            'orderReceipts.client'
         ])->findOrFail($id);
 
         // Add 'assigned' key to containers
@@ -357,6 +361,12 @@ class ShipOrderDataController extends Controller
             ]);
 
             return DB::transaction(function () use ($validatedData, $shipOrderData) {
+                $shipOrderData = ShipOrderData::lockForUpdate()->findOrFail($shipOrderData->id);
+                $existingClient = $shipOrderData->shipLineClients()->first();
+                if ($existingClient && $existingClient->client_id != $validatedData['client_id']
+                    && $shipOrderData->orderReceipts()->where('client_id', $existingClient->client_id)->exists()) {
+                    return response()->json(['message' => 'A client with receipt history cannot be removed from this order.'], 409);
+                }
 
                 // =========================
                 // Update Ship Order
@@ -612,6 +622,9 @@ class ShipOrderDataController extends Controller
                 return response()->json(['error' => 'Unauthorized'], 403);
             }
             $shipOrderData = ShipOrderData::findOrFail($id);
+            if ($shipOrderData->orderReceipts()->exists() || $shipOrderData->transportReceipt()->exists()) {
+                return response()->json(['message' => 'Orders with receipt history cannot be deleted.'], 409);
+            }
 
             DB::transaction(function () use ($shipOrderData) {
 

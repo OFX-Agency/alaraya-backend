@@ -123,11 +123,16 @@ class ReportsController extends Controller
                 'policies.vehicleDriverAssignments.vehicle',
                 'policies.vehicleDriverAssignments.driver',
                 'policies.vehicleDriverAssignments.driverExtras',
-                'policies.transportReceipts',
+                'policies.transportReceipts' => fn ($q) => $q->whereNull('cancelled_at')->whereNull('migrated_to_order_receipt_at'),
                 'policies',
-                'transportReceipt'
+                'transportReceipt' => fn ($q) => $q->whereNull('cancelled_at')->whereNull('migrated_to_order_receipt_at'),
+                'orderReceipts.items',
+                'orderReceipts.client'
             ]);
 
+            if ($request->user() && !$request->user()->hasRole('admin')) {
+                $query->whereHas('treasuries', fn ($q) => $q->whereIn('treasuries.id', $request->user()->treasuries()->pluck('treasuries.id')));
+            }
             $number = $request->number;
             $clientName = $request->clientName;
 
@@ -142,6 +147,9 @@ class ReportsController extends Controller
                 });
             }
 
+            if ($request->filled('client_id')) {
+                $query->whereHas('shipLineClients', fn ($q) => $q->where('client_id', $request->client_id));
+            }
             $shipOrders = $query->get();
 
             if ($shipOrders->isEmpty()) {
@@ -155,6 +163,7 @@ class ReportsController extends Controller
             $totalOperatingOrders = 0;
             $totalOrdersNoloans = 0;
             $totalTransportReceiptsSum = 0;
+            $totalOrderReceiptsSum = 0;
             $totalNoloanSum = 0;
             $totalDriverExtrasSum = 0;
             $totalCovenantAmountSum = 0;
@@ -162,6 +171,12 @@ class ReportsController extends Controller
             $shipOrdersDetails = [];
 
             foreach ($shipOrders as $shipOrder) {
+                $orderReceipts = $shipOrder->orderReceipts->filter(function ($receipt) use ($clientName, $request) {
+                    if ($request->filled('client_id') && $receipt->client_id != $request->client_id) return false;
+                    return empty($clientName) || mb_stripos($receipt->client->client_name ?? '', $clientName) !== false;
+                })->values();
+                $orderReceiptsSum = $orderReceipts->where('status', 'posted')->sum(fn ($r) => \App\Services\ReceiptAccounting::cents($r->total));
+                $totalOrderReceiptsSum += $orderReceiptsSum;
                 // Count operating orders
                 $operatingOrdersCount = $shipOrder->operatingOrder ? 1 : 0;
                 $totalOperatingOrders += $operatingOrdersCount;
@@ -267,6 +282,8 @@ class ReportsController extends Controller
                     'transfers_count' => $shipOrder->transfers_count,
                     'has_operating_order' => $operatingOrdersCount > 0,
                     'transport_receipts_sum' => $transportReceiptsSum,
+                    'order_receipts' => $orderReceipts,
+                    'order_receipts_sum' => \App\Services\ReceiptAccounting::decimal($orderReceiptsSum),
                     'driver_extras_total' => $driverExtrasSum,
                     'covenant_amount_total' => $covenantAmountSum,
                     'transportReceipt' => ($shipOrder->transportReceipt ?? collect())->map(function ($transportReceipt) {
@@ -340,7 +357,7 @@ class ReportsController extends Controller
             }
 
             // Calculate net amount
-            $netAmount = ($totalNoloanSum - $totalCovenantAmountSum) + $totalDriverExtrasSum;
+            $netAmount = ($totalNoloanSum - $totalCovenantAmountSum) + $totalDriverExtrasSum + ($totalOrderReceiptsSum / 100);
 
             return response()->json([
                 'success' => true,
@@ -350,6 +367,7 @@ class ReportsController extends Controller
                     'total_orders_noloans' => $totalOrdersNoloans,
                     'ship_orders_details' => $shipOrdersDetails,
                     'total_sum_transport_receipts' => $totalTransportReceiptsSum,
+                    'total_sum_order_receipts' => \App\Services\ReceiptAccounting::decimal($totalOrderReceiptsSum),
                     'total_sum_noloan' => $totalNoloanSum,
                     'total_driver_extras' => $totalDriverExtrasSum,
                     'total_covenant_amount' => $totalCovenantAmountSum,

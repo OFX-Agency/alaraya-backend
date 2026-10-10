@@ -24,23 +24,25 @@ class TreasuryOperationsController extends Controller
         ]);
 
         try {
-            // Find the main treasury
-            $mainTreasury = Treasury::where('is_main', true)->firstOrFail();
-            $userId = auth()->user()->id;
-            // Create a new transaction for the deposit
-            $transaction = new TreasuryTransactions();
-            $transaction->user_id = $userId;
-            $transaction->receivable_id = $mainTreasury->id;
-            $transaction->payable_id = $mainTreasury->id;
-            $transaction->amount = $request->input('amount');
-            $transaction->description = $request->input('description', 'Deposit to main treasury');
-            $transaction->save();
+            return DB::transaction(function () use ($request) {
+                // Find the main treasury
+                $mainTreasury = Treasury::where('is_main', true)->lockForUpdate()->firstOrFail();
+                $userId = auth()->user()->id;
+                // Create a new transaction for the deposit
+                $transaction = new TreasuryTransactions();
+                $transaction->user_id = $userId;
+                $transaction->receivable_id = $mainTreasury->id;
+                $transaction->payable_id = $mainTreasury->id;
+                $transaction->amount = $request->input('amount');
+                $transaction->description = $request->input('description', 'Deposit to main treasury');
+                $transaction->save();
 
-            // Update the main treasury balance
-            $mainTreasury->balance += $request->input('amount');
-            $mainTreasury->save();
+                // Update the main treasury balance
+                $mainTreasury->balance += $request->input('amount');
+                $mainTreasury->save();
 
-            return response()->json(['message' => 'Deposit successful', 'transaction' => $transaction], 201);
+                return response()->json(['message' => 'Deposit successful', 'transaction' => $transaction], 201);
+            }, 3);
         } catch (\Exception $e) {
             return response()->json(['error' => $e->getMessage()], 500);
         }
@@ -59,51 +61,50 @@ class TreasuryOperationsController extends Controller
         ]);
 
         try {
-            // Get the authenticated user ID
-            $validatedData['user_id'] = auth()->id();
+            return DB::transaction(function () use ($validatedData) {
+                // Get the authenticated user ID
+                $validatedData['user_id'] = auth()->id();
 
-            // Find the main treasury
-            $mainTreasury = Treasury::where('is_main', true)->firstOrFail();
+                // Find the main treasury
+                $mainTreasury = Treasury::where('is_main', true)->lockForUpdate()->firstOrFail();
 
-            // Find the receivable treasury
-            $receivableTreasury = Treasury::findOrFail($validatedData['receivable_id']);
+                // Find the receivable treasury
+                $receivableTreasury = Treasury::lockForUpdate()->findOrFail($validatedData['receivable_id']);
 
-            // Check if the main treasury has sufficient balance
-            if ($mainTreasury->balance < $validatedData['amount']) {
-                return response()->json(['error' => 'Insufficient balance in the main treasury'], 400);
-            }
+                // Check if the main treasury has sufficient balance
+                if ($mainTreasury->balance < $validatedData['amount']) {
+                    return response()->json(['error' => 'Insufficient balance in the main treasury'], 400);
+                }
 
-            // check if the receivable treasury is not the main treasury
-            if ($receivableTreasury->id === $mainTreasury->id) {
-                return response()->json(['error' => 'Cannot transfer to the main treasury'], 400);
-            }
+                // check if the receivable treasury is not the main treasury
+                if ($receivableTreasury->id === $mainTreasury->id) {
+                    return response()->json(['error' => 'Cannot transfer to the main treasury'], 400);
+                }
 
-            // check if the user is authenticated
-            if (!$validatedData['user_id']) {
-                return response()->json(['error' => 'User not authenticated'], 401);
-            }
-            DB::beginTransaction();
-            // Create a new transaction for the transfer
-            $transaction = new TreasuryTransactions();
-            $transaction->user_id = $validatedData['user_id'];
-            $transaction->receivable_id = $validatedData['receivable_id'];
-            $transaction->payable_id = $mainTreasury->id;
-            $transaction->amount = $validatedData['amount'];
-            $transaction->description = $validatedData['description'] ?? 'Transfer from main treasury';
-            $transaction->save();
+                // check if the user is authenticated
+                if (!$validatedData['user_id']) {
+                    return response()->json(['error' => 'User not authenticated'], 401);
+                }
+                // Create a new transaction for the transfer
+                $transaction = new TreasuryTransactions();
+                $transaction->user_id = $validatedData['user_id'];
+                $transaction->receivable_id = $validatedData['receivable_id'];
+                $transaction->payable_id = $mainTreasury->id;
+                $transaction->amount = $validatedData['amount'];
+                $transaction->description = $validatedData['description'] ?? 'Transfer from main treasury';
+                $transaction->save();
 
-            // Update the main treasury balance
-            $mainTreasury->balance -= $validatedData['amount'];
-            $mainTreasury->save();
+                // Update the main treasury balance
+                $mainTreasury->balance -= $validatedData['amount'];
+                $mainTreasury->save();
 
-            // Update the receivable treasury balance
-            $receivableTreasury->balance += $validatedData['amount'];
-            $receivableTreasury->save();
+                // Update the receivable treasury balance
+                $receivableTreasury->balance += $validatedData['amount'];
+                $receivableTreasury->save();
 
-            DB::commit();
-            return response()->json(['message' => 'Transfer successful', 'transaction' => $transaction], 201);
+                return response()->json(['message' => 'Transfer successful', 'transaction' => $transaction], 201);
+            }, 3);
         } catch (\Exception $e) {
-            DB::rollBack();
             return response()->json(['error' => $e->getMessage()], 500);
         }
     }
@@ -126,36 +127,35 @@ class TreasuryOperationsController extends Controller
         $validatedData['user_id'] = auth()->id();
 
         try {
-            // Find the treasury
-            $treasury = Treasury::findOrFail($validatedData['treasury_id']);
+            return DB::transaction(function () use ($validatedData) {
+                // Find the treasury
+                $treasury = Treasury::lockForUpdate()->findOrFail($validatedData['treasury_id']);
 
-            // Check if the treasury has sufficient balance
-            if ($treasury->balance < $validatedData['amount']) {
-                return response()->json(['error' => 'Insufficient balance in the treasury'], 400);
-            }
+                // Check if the treasury has sufficient balance
+                if ($treasury->balance < $validatedData['amount']) {
+                    return response()->json(['error' => 'Insufficient balance in the treasury'], 400);
+                }
 
-            // check if the user is authenticated
-            if (!$validatedData['user_id']) {
-                return response()->json(['error' => 'User not authenticated'], 401);
-            }
+                // check if the user is authenticated
+                if (!$validatedData['user_id']) {
+                    return response()->json(['error' => 'User not authenticated'], 401);
+                }
 
-            DB::beginTransaction();
-            // Create a new deduction record
-            $deduction = new TreasuryDeduction();
-            $deduction->user_id = $validatedData['user_id'];
-            $deduction->treasury_id = $validatedData['treasury_id'];
-            $deduction->amount = $validatedData['amount'];
-            $deduction->reason = $validatedData['reason'] ?? 'Deduction from treasury';
-            $deduction->type = $validatedData['type'];
-            $deduction->save();
+                // Create a new deduction record
+                $deduction = new TreasuryDeduction();
+                $deduction->user_id = $validatedData['user_id'];
+                $deduction->treasury_id = $validatedData['treasury_id'];
+                $deduction->amount = $validatedData['amount'];
+                $deduction->reason = $validatedData['reason'] ?? 'Deduction from treasury';
+                $deduction->type = $validatedData['type'];
+                $deduction->save();
 
-            // Update the treasury balance
-            $treasury->balance -= $validatedData['amount'];
-            $treasury->save();
-            DB::commit();
-            return response()->json(['message' => 'Deduction successful', 'deduction' => $deduction], 201);
+                // Update the treasury balance
+                $treasury->balance -= $validatedData['amount'];
+                $treasury->save();
+                return response()->json(['message' => 'Deduction successful', 'deduction' => $deduction], 201);
+            }, 3);
         } catch (\Exception $e) {
-            DB::rollBack();
             return response()->json(['error' => $e->getMessage()], 500);
         }
     }
@@ -172,6 +172,9 @@ class TreasuryOperationsController extends Controller
 
     try {
         $deduction = TreasuryDeduction::findOrFail($id);
+        if ($deduction->order_receipt_id || $deduction->transport_receipt_id || str_starts_with($deduction->type ?? '', 'order_receipt') || str_starts_with($deduction->type ?? '', 'transport_receipt')) {
+            return response()->json(['message' => 'Use the receipt workflow for receipt-generated deductions.'], 409);
+        }
 
         DB::beginTransaction();
 
@@ -218,6 +221,9 @@ public function destroyDeduction($id)
 {
     try {
         $deduction = TreasuryDeduction::findOrFail($id);
+        if ($deduction->order_receipt_id || $deduction->transport_receipt_id || str_starts_with($deduction->type ?? '', 'order_receipt') || str_starts_with($deduction->type ?? '', 'transport_receipt')) {
+            return response()->json(['message' => 'Use the receipt workflow for receipt-generated deductions.'], 409);
+        }
 
         DB::beginTransaction();
 

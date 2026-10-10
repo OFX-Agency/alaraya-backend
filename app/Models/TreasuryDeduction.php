@@ -13,6 +13,8 @@ class TreasuryDeduction extends Model
     use HasFactory, LogsActivity;
 
     protected $fillable = [
+        'order_receipt_id',
+        'transport_receipt_id',
         'user_id',
         'treasury_id',
         'amount',

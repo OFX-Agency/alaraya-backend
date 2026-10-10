@@ -125,7 +125,7 @@ class PolicyController extends Controller
 
             $policyData['user_id'] = auth()->id(); // Assuming you want to associate the policy with the authenticated user
             $policy = Policy::create($policyData);
-            $treasury = $shipOrderData->treasuries()->first();
+            $treasury = $shipOrderData->treasuries()->lockForUpdate()->first();
 
             if ($treasury) {
                 $covenantAmount = $policyData['covenant_amount'] ?? 0;
@@ -247,7 +247,11 @@ class PolicyController extends Controller
                 ? ($validated['covenant_amount'] ?? 0)
                 : $oldCovenantAmount;
 
-            $shipOrderChanged = $oldShipOrderDataId !== $newShipOrderDataId;
+            $shipOrderChanged = (int) $oldShipOrderDataId !== (int) $newShipOrderDataId;
+            if ($shipOrderChanged && $policy->transportReceipts()->exists()) {
+                DB::rollBack();
+                return response()->json(['message' => 'A policy with receipt history cannot be moved to another order.'], 409);
+            }
 
             // Existing deduction row tied to this policy (if any)
             $existingDeduction = $oldCovenantAmount > 0
@@ -402,9 +406,15 @@ class PolicyController extends Controller
             return response()->json(['error' => 'Unauthorized'], 403);
         }
         $policy = Policy::findOrFail($id);
-        $treasury = $policy->shipOrderData->treasuries()->first();
+        if ($policy->transportReceipts()->exists()) return response()->json(['message' => 'Policies with receipt history cannot be deleted.'], 409);
         try {
             DB::beginTransaction();
+            $policy = Policy::lockForUpdate()->findOrFail($id);
+            if ($policy->transportReceipts()->exists()) {
+                DB::rollBack();
+                return response()->json(['message' => 'Policies with receipt history cannot be deleted.'], 409);
+            }
+            $treasury = $policy->shipOrderData->treasuries()->lockForUpdate()->first();
             // Refund covenant amount to treasury if applicable
             if ($treasury && $policy->covenant_amount > 0) {
                 $treasury->balance += $policy->covenant_amount;

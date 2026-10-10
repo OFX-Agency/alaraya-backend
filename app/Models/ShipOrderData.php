@@ -48,6 +48,11 @@ class ShipOrderData extends Model
             'order_treasury'
         );
     }
+    public function orderReceipts()
+    {
+        return $this->hasMany(OrderReceipt::class, 'ship_order_id');
+    }
+
     public function transportReceipt()
     {
         return $this->hasMany(TransportReceipt::class, 'ship_order_id', 'id');

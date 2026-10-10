@@ -2,420 +2,145 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\TransportReceipt;
 use App\Models\Policy;
+use App\Models\ShipOrderData;
+use App\Models\TransportReceipt;
+use App\Services\ReceiptAccounting as Money;
 use Illuminate\Http\Request;
-use Illuminate\Http\JsonResponse;
-use Illuminate\Validation\ValidationException;
-use Illuminate\Validation\Rule;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 
 class TransportReceiptController extends Controller
 {
-    /**
-     * Display a listing of the resource.
-     */
-    public function index(): JsonResponse
+    public function index(Request $request)
     {
-        $transportReceipts = TransportReceipt::with('shipOrder', 'policy')->get();
+        $query = TransportReceipt::with('shipOrder', 'policy')->whereNull('migrated_to_order_receipt_at');
+        if (! $request->user()->hasRole('admin')) {
+            $ids = $request->user()->treasuries()->pluck('treasuries.id');
+            $query->where(function ($q) use ($ids) {
+                $q->whereIn('treasury_id', $ids)->orWhere(function ($legacy) use ($ids) {
+                    $legacy->whereNull('treasury_id')->whereHas('shipOrder.treasuries', fn ($t) => $t->whereIn('treasuries.id', $ids));
+                });
+            });
+        }
 
-        return response()->json([
-            'success' => true,
-            'data' => $transportReceipts
-        ]);
+        return response()->json(['success' => true, 'data' => $query->get()]);
     }
 
-    /**
-     * Store a newly created resource in storage.
-     */
+    private function authorizeReceipt(Request $request, TransportReceipt $receipt): void
+    {
+        if ($receipt->treasury_id) {
+            Money::authorizeTreasury($request->user(), $receipt->treasury_id);
+        } else {
+            abort_unless($request->user()->hasRole('admin') || $receipt->shipOrder->treasuries()
+                ->whereIn('treasuries.id', $request->user()->treasuries()->pluck('treasuries.id'))->exists(), 403);
+        }
+    }
+
+    public function show(Request $request, $id)
+    {
+        $receipt = TransportReceipt::findOrFail($id);
+        $this->authorizeReceipt($request, $receipt);
+
+        return response()->json(['success' => true, 'data' => $receipt->load('shipOrder', 'policy')]);
+    }
+
+    private function rules(): array
+    {
+        return array_fill_keys(TransportReceipt::EXPENSE_FIELDS, ['nullable', 'numeric', 'min:0',
+            'max:999999.99', 'regex:/^[0-9]{1,6}(\.[0-9]{1,2})?$/']);
+    }
+
+    private function total(array $data): int
+    {
+        return array_sum(array_map(fn ($value) => Money::cents($value), $data));
+    }
+
     public function store(Request $request)
     {
-        $userId = auth()->user()->id;
-        try {
-            $validated = $request->validate([
-                'ship_order_id' => 'required|exists:ship_order_data,id',
-                'policy_id' => [
-                    'nullable',
-                    Rule::exists('policies', 'id')->where(function ($query) use ($request) {
-                        $query->where('ship_order_data_id', $request->ship_order_id);
-                    }),
-                ],
-                'army_scales' => 'nullable|numeric|min:0',
-                'roads_and_bridges' => 'nullable|numeric|min:0',
-                'road_cards' => 'nullable|numeric|min:0',
-                'governorate_voucher' => 'nullable|numeric|min:0',
-                'tips' => 'nullable|numeric|min:0',
-                'official_receipts' => 'nullable|numeric|min:0',
-                'overnight_leave' => 'nullable|numeric|min:0',
-                'tarif_receipts' => 'nullable|numeric|min:0',
-                'third_party_car_rental' => 'nullable|numeric|min:0',
-                'customs_clearance' => 'nullable|numeric|min:0',
-                'bill_of_lading_amendment' => 'nullable|numeric|min:0',
-                'third_party_vehicle_leave' => 'nullable|numeric|min:0',
-                'brokers' => 'nullable|numeric|min:0',
-                'vgm' => 'nullable|numeric|min:0',
-                'x_ray' => 'nullable|numeric|min:0',
-                'data_entry' => 'nullable|numeric|min:0',
-                'yard_receipts' => 'nullable|numeric|min:0',
-                'port_authority_receipts' => 'nullable|numeric|min:0',
-                'port_weight_fees' => 'nullable|numeric|min:0',
-                'agency_receipts' => 'nullable|numeric|min:0',
-                'explosives_receipt' => 'nullable|numeric|min:0',
-                'bascule_scale_receipt' => 'nullable|numeric|min:0',
-                'cashier_receipt' => 'nullable|numeric|min:0',
-                'reweighing_receipt' => 'nullable|numeric|min:0',
-                'sina_marine_receipts' => 'nullable|numeric|min:0',
-                'tunnel_ferry_receipts' => 'nullable|numeric|min:0',
-                'container_repair_receipt' => 'nullable|numeric|min:0',
-                'port_receipts' => 'nullable|numeric|min:0',
-                'x_ray_leave' => 'nullable|numeric|min:0',
-                'allocation' => 'nullable|numeric|min:0',
-                'guarantee' => 'nullable|numeric|min:0',
-                'form' => 'nullable|numeric|min:0',
-            ]);
+        $data = $request->validate($this->rules() + [
+            'ship_order_id' => 'required|integer|exists:ship_order_data,id',
+            'policy_id' => ['required', 'integer', Rule::exists('policies', 'id')->where('ship_order_data_id', $request->ship_order_id)],
+            'treasury_id' => 'sometimes|required|integer|exists:treasuries,id',
+        ]);
 
-            DB::beginTransaction();
-            if (isset($validated['policy_id'])) {
-                $policy = Policy::find($validated['policy_id']);
-                if ($policy->settled || $policy->transportReceipts != null) {
-                    DB::rollBack();
-
-                    return response()->json([
-                        'success' => false,
-                        'message' => '
-                        هذه الوثيقة تمت تسويتها مسبقًا أو لديها إيصال نقل مرتبط بها، لذا لا يمكن إنشاء إيصال نقل جديد.
-                        '
-                    ], 400);
-                }
+        return DB::transaction(function () use ($request, $data) {
+            $order = ShipOrderData::lockForUpdate()->findOrFail($data['ship_order_id']);
+            $policy = Policy::lockForUpdate()->findOrFail($data['policy_id']);
+            abort_if($policy->ship_order_data_id != $order->id, 409, 'Policy order changed.');
+            abort_if($policy->settled || $policy->transportReceipts()->exists(), 409, 'Policy is settled or already has a receipt.');
+            $treasuryId = $data['treasury_id'] ?? $order->treasuries()->value('treasuries.id');
+            if (! $treasuryId || ! $order->treasuries()->where('treasuries.id', $treasuryId)->exists()) {
+                throw ValidationException::withMessages(['treasury_id' => 'Choose a treasury associated with this order.']);
             }
-
-            $total = collect($validated)->only([
-                'army_scales',
-                'roads_and_bridges',
-                'road_cards',
-                'governorate_voucher',
-                'tips',
-                'official_receipts',
-                'overnight_leave',
-                'tarif_receipts',
-                'third_party_car_rental',
-                'customs_clearance',
-                'bill_of_lading_amendment',
-                'third_party_vehicle_leave',
-                'brokers',
-                'vgm',
-                'x_ray',
-                'data_entry',
-                'yard_receipts',
-                'port_authority_receipts',
-                'port_weight_fees',
-                'agency_receipts',
-                'explosives_receipt',
-                'bascule_scale_receipt',
-                'cashier_receipt',
-                'reweighing_receipt',
-                'sina_marine_receipts',
-                'tunnel_ferry_receipts',
-                'container_repair_receipt',
-                'port_receipts',
-                'x_ray_leave',
-                'allocation',
-                'guarantee',
-                'form'
-            ])->sum();
-            $transportReceipt = TransportReceipt::create($validated);
-
-            $shipOrder = $transportReceipt->shipOrder;
-            $treasury = $shipOrder->treasuries()->first();
-
-            if (!$treasury) {
-                DB::rollBack();
-
-                return response()->json([
-                    'success' => false,
-                    'message' => 'لم يتم تعيين خزينة لطلب الشحن'
-                ], 400);
+            Money::authorizeTreasury($request->user(), $treasuryId);
+            $data['treasury_id'] = $treasuryId;
+            $total = $this->total(array_intersect_key($data, $this->rules()));
+            if ($total <= 0) {
+                throw ValidationException::withMessages(['amount' => 'Receipt total must be positive.']);
             }
+            $receipt = TransportReceipt::create($data);
+            Money::post($treasuryId, $total, $request->user(), ['transport_receipt_id' => $receipt->id, 'type' => 'transport_receipt'], 'مصاريف إيصال النقل #'.$receipt->id.' للأوردر #'.$order->order_number);
 
-            if ($treasury->balance < $total) {
-                DB::rollBack();
-
-                return response()->json([
-                    'success' => false,
-                    'message' => 'الرصيد غير كافٍ في الخزينة'
-                ], 400);
-            }
-
-            $treasury->balance -= $total;
-            $treasury->save();
-
-            $treasury->deductions()->create([
-                'user_id' => $userId,
-                'amount' => $total,
-                'reason' => 'مصاريف إيصال النقل لطلب الشحن رقم #' . $shipOrder->order_number,
-                'type' => 'transport_receipt',
-            ]);
-            DB::commit();
-            return response()->json([
-                'success' => true,
-                'message' => 'Transport receipt created successfully',
-                'data' => $transportReceipt->load('shipOrder')
-            ], 201);
-        } catch (ValidationException $e) {
-            DB::rollBack();
-            return response()->json([
-                'success' => false,
-                'message' => 'Validation failed',
-                'errors' => $e->errors()
-            ], 422);
-        } catch (\Exception $e) {
-            DB::rollBack();
-
-            return response()->json([
-                'success' => false,
-                'message' => 'Failed to create transport receipt',
-                'error' => $e->getMessage()
-            ], 500);
-        }
+            return response()->json(['success' => true, 'data' => $receipt->load('shipOrder', 'policy')], 201);
+        }, 3);
     }
 
-    /**
-     * Display the specified resource.
-     */
-    public function show(string $id): JsonResponse
+    private function editable(TransportReceipt $receipt): void
     {
-        try {
-            $transportReceipt = TransportReceipt::with('shipOrder', 'policy')->findOrFail($id);
-
-            return response()->json([
-                'success' => true,
-                'data' => $transportReceipt
-            ]);
-        } catch (\Illuminate\Database\Eloquent\ModelNotFoundException $e) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Transport receipt not found'
-            ], 404);
-        } catch (\Exception $e) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Failed to retrieve transport receipt',
-                'error' => $e->getMessage()
-            ], 500);
-        }
+        abort_if($receipt->cancelled_at || $receipt->migrated_to_order_receipt_at, 409, 'Receipt is cancelled or migrated.');
+        abort_if(! $receipt->treasury_id, 409, 'Legacy receipt requires treasury reconciliation before editing or cancellation.');
+        abort_if(! $receipt->policy || $receipt->policy->settled, 409, 'Policy is missing or settled.');
+        abort_if($receipt->policy->ship_order_data_id != $receipt->ship_order_id, 409, 'Policy/order mismatch requires reconciliation.');
     }
 
-    /**
-     * Update the specified resource in storage.
-     */
-    public function update(Request $request, string $id): JsonResponse
+    public function update(Request $request, $id)
     {
-        try {
-            DB::beginTransaction();
+        $data = $request->validate($this->rules() + ['ship_order_id' => 'prohibited', 'policy_id' => 'prohibited', 'treasury_id' => 'prohibited']);
+        $original = TransportReceipt::findOrFail($id);
+        $this->authorizeReceipt($request, $original);
 
-            $transportReceipt = TransportReceipt::findOrFail($id);
-
-            $validated = $request->validate([
-                'ship_order_id' => 'sometimes|required|exists:ship_order_data,id',
-                'army_scales' => 'nullable|numeric|min:0',
-                'roads_and_bridges' => 'nullable|numeric|min:0',
-                'road_cards' => 'nullable|numeric|min:0',
-                'governorate_voucher' => 'nullable|numeric|min:0',
-                'tips' => 'nullable|numeric|min:0',
-                'official_receipts' => 'nullable|numeric|min:0',
-                'overnight_leave' => 'nullable|numeric|min:0',
-                'tarif_receipts' => 'nullable|numeric|min:0',
-                'third_party_car_rental' => 'nullable|numeric|min:0',
-                'customs_clearance' => 'nullable|numeric|min:0',
-                'bill_of_lading_amendment' => 'nullable|numeric|min:0',
-                'third_party_vehicle_leave' => 'nullable|numeric|min:0',
-                'brokers' => 'nullable|numeric|min:0',
-                'vgm' => 'nullable|numeric|min:0',
-                'x_ray' => 'nullable|numeric|min:0',
-                'data_entry' => 'nullable|numeric|min:0',
-                'yard_receipts' => 'nullable|numeric|min:0',
-                'port_authority_receipts' => 'nullable|numeric|min:0',
-                'port_weight_fees' => 'nullable|numeric|min:0',
-                'agency_receipts' => 'nullable|numeric|min:0',
-                'explosives_receipt' => 'nullable|numeric|min:0',
-                'bascule_scale_receipt' => 'nullable|numeric|min:0',
-                'cashier_receipt' => 'nullable|numeric|min:0',
-                'reweighing_receipt' => 'nullable|numeric|min:0',
-                'sina_marine_receipts' => 'nullable|numeric|min:0',
-                'tunnel_ferry_receipts' => 'nullable|numeric|min:0',
-                'container_repair_receipt' => 'nullable|numeric|min:0',
-                'port_receipts' => 'nullable|numeric|min:0',
-                'x_ray_leave' => 'nullable|numeric|min:0',
-                'allocation' => 'nullable|numeric|min:0',
-                'guarantee' => 'nullable|numeric|min:0',
-                'form' => 'nullable|numeric|min:0',
-            ]);
-
-            $expenseFields = [
-                'army_scales',
-                'roads_and_bridges',
-                'road_cards',
-                'governorate_voucher',
-                'tips',
-                'official_receipts',
-                'overnight_leave',
-                'tarif_receipts',
-                'third_party_car_rental',
-                'customs_clearance',
-                'bill_of_lading_amendment',
-                'third_party_vehicle_leave',
-                'brokers',
-                'vgm',
-                'x_ray',
-                'data_entry',
-                'yard_receipts',
-                'port_authority_receipts',
-                'port_weight_fees',
-                'agency_receipts',
-                'explosives_receipt',
-                'bascule_scale_receipt',
-                'cashier_receipt',
-                'reweighing_receipt',
-                'sina_marine_receipts',
-                'tunnel_ferry_receipts',
-                'container_repair_receipt',
-                'port_receipts',
-                'x_ray_leave',
-                'allocation',
-                'guarantee',
-                'form'
-            ];
-
-            // Old total from the record as it currently stands
-            $oldTotal = collect($transportReceipt->only($expenseFields))->sum();
-
-            // IMPORTANT: merge validated data over the existing record so fields
-            // that weren't sent in this request (nullable/sometimes) still count
-            // toward the new total instead of silently dropping to 0.
-            $mergedFields = array_merge(
-                $transportReceipt->only($expenseFields),
-                collect($validated)->only($expenseFields)->toArray()
-            );
-            $newTotal = collect($mergedFields)->sum();
-
-            $shipOrder = $transportReceipt->shipOrder;
-
-            // Lock the treasury row to avoid race conditions with concurrent deductions
-            $treasury = $shipOrder->treasuries()->lockForUpdate()->first();
-
-            if (!$treasury) {
-                DB::rollBack();
-
-                return response()->json([
-                    'success' => false,
-                    'message' => 'لم يتم تعيين خزينة لطلب الشحن'
-                ], 400);
+        return DB::transaction(function () use ($request, $id, $data, $original) {
+            ShipOrderData::lockForUpdate()->findOrFail($original->ship_order_id);
+            if ($original->policy_id) {
+                Policy::lockForUpdate()->findOrFail($original->policy_id);
             }
-
-            $difference = $newTotal - $oldTotal;
-
-            // Only need to check balance sufficiency when the edit INCREASES the amount
-            if ($difference > 0 && $treasury->balance < $difference) {
-                DB::rollBack();
-
-                return response()->json([
-                    'success' => false,
-                    'message' => 'الرصيد غير كافٍ في الخزينة'
-                ], 400);
+            $receipt = TransportReceipt::lockForUpdate()->findOrFail($id);
+            $this->editable($receipt);
+            $old = $this->total($receipt->only(TransportReceipt::EXPENSE_FIELDS));
+            $new = $this->total(array_merge($receipt->only(TransportReceipt::EXPENSE_FIELDS), $data));
+            if ($new <= 0) {
+                throw ValidationException::withMessages(['amount' => 'Receipt total must be positive.']);
             }
+            Money::post($receipt->treasury_id, $new - $old, $request->user(), ['transport_receipt_id' => $receipt->id, 'type' => 'transport_receipt_adjustment'], 'تعديل إيصال النقل #'.$receipt->id);
+            $receipt->update($data);
 
-            // difference > 0 (increase) -> balance goes down
-            // difference < 0 (decrease) -> balance goes up (refund)
-            // difference == 0 -> no change
-            if ($difference !== 0) {
-                $treasury->balance -= $difference;
-                $treasury->save();
-            }
-
-            $deduction = $treasury->deductions()
-                ->where('type', 'transport_receipt')
-                ->where('reason', 'مصاريف إيصال النقل لطلب الشحن رقم #' . $shipOrder->order_number)
-                ->latest()
-                ->first();
-
-            if ($deduction) {
-                $deduction->update([
-                    'amount' => $newTotal,
-                    'user_id' => auth()->user()->id,
-                    'reason' => ' تعديل مصاريف إيصال النقل لطلب الشحن رقم #' . $shipOrder->order_number,
-                ]);
-            } else {
-                $treasury->deductions()->create([
-                    'user_id' => auth()->user()->id,
-                    'amount' => $newTotal,
-                    'reason' => ' تعديل مصاريف إيصال النقل لطلب الشحن رقم #' . $shipOrder->order_number,
-                    'type' => 'transport_receipt',
-                ]);
-            }
-
-            $transportReceipt->update($validated);
-
-            DB::commit();
-
-            return response()->json([
-                'success' => true,
-                'message' => 'Transport receipt updated successfully',
-                'data' => $transportReceipt->load('shipOrder')
-            ]);
-        } catch (ValidationException $e) {
-            DB::rollBack();
-
-            return response()->json([
-                'success' => false,
-                'message' => 'Validation failed',
-                'errors' => $e->errors()
-            ], 422);
-        } catch (\Illuminate\Database\Eloquent\ModelNotFoundException $e) {
-            DB::rollBack();
-
-            return response()->json([
-                'success' => false,
-                'message' => 'Transport receipt not found'
-            ], 404);
-        } catch (\Exception $e) {
-            DB::rollBack();
-
-            return response()->json([
-                'success' => false,
-                'message' => 'Failed to update transport receipt',
-                'error' => $e->getMessage()
-            ], 500);
-        }
+            return response()->json(['success' => true, 'data' => $receipt->load('shipOrder', 'policy')]);
+        }, 3);
     }
 
-    /**
-     * Remove the specified resource from storage.
-     */
-    public function destroy(string $id): JsonResponse
+    // Backwards-compatible DELETE route now cancels and refunds, retaining the record.
+    public function destroy(Request $request, $id)
     {
-        try {
-            $user = auth()->user();
-            if (!$user->hasRole('admin')) {
-                return response()->json(['error' => 'Unauthorized'], 403);
-            }
-            $transportReceipt = TransportReceipt::findOrFail($id);
-            $transportReceipt->delete();
+        abort_unless($request->user()->hasRole('admin'), 403);
+        $data = $request->validate(['reason' => 'required|string|max:2000']);
+        $original = TransportReceipt::findOrFail($id);
 
-            return response()->json([
-                'success' => true,
-                'message' => 'Transport receipt deleted successfully'
-            ]);
-        } catch (\Illuminate\Database\Eloquent\ModelNotFoundException $e) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Transport receipt not found'
-            ], 404);
-        } catch (\Exception $e) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Failed to delete transport receipt',
-                'error' => $e->getMessage()
-            ], 500);
-        }
+        return DB::transaction(function () use ($request, $id, $data, $original) {
+            ShipOrderData::lockForUpdate()->findOrFail($original->ship_order_id);
+            if ($original->policy_id) {
+                Policy::lockForUpdate()->findOrFail($original->policy_id);
+            }
+            $receipt = TransportReceipt::lockForUpdate()->findOrFail($id);
+            if (! $receipt->cancelled_at) {
+                $this->editable($receipt);
+                Money::post($receipt->treasury_id, -$this->total($receipt->only(TransportReceipt::EXPENSE_FIELDS)), $request->user(),
+                    ['transport_receipt_id' => $receipt->id, 'type' => 'transport_receipt_reversal'], 'إلغاء إيصال النقل #'.$receipt->id);
+                $receipt->update(['cancelled_at' => now(), 'cancelled_by' => $request->user()->id, 'cancellation_reason' => $data['reason']]);
+            }
+
+            return response()->json(['success' => true, 'message' => 'Transport receipt cancelled', 'data' => $receipt]);
+        }, 3);
     }
 }

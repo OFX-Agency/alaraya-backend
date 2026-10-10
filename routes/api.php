@@ -72,6 +72,10 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/treasury/update/deduction/{id}', [TreasuryOperationsController::class, 'updateDeduction']);
     Route::post('/treasury/delete/deduction/{id}', [TreasuryOperationsController::class, 'destroyDeduction']);
     Route::post('/treasury/shift-handle', [TreasuryOperationsController::class, 'shiftHandle']);
+    Route::get('/order-receipts/categories', [\App\Http\Controllers\OrderReceiptController::class, 'categories']);
+    Route::post('/order-receipts/{id}/cancel', [\App\Http\Controllers\OrderReceiptController::class, 'cancel']);
+    Route::apiResource('/order-receipts', \App\Http\Controllers\OrderReceiptController::class)->except('destroy');
+
     // Handle Transport Receipt
     Route::apiResource('/transport-receipts', TransportReceiptController::class);
 
