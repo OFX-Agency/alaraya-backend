@@ -10,6 +10,7 @@ use App\Models\Vehicle;
 use App\Models\Drivers;
 use App\Models\ShippingLine;
 use App\Models\Destination;
+use App\Models\OperatingOrder;
 
 class ReportsController extends Controller
 {
@@ -656,6 +657,7 @@ class ReportsController extends Controller
         $drivers = Drivers::all()->count();
         $shiplines = ShippingLine::all()->count();
         $destinations = Destination::all()->count();
+        $opertatingOrders = OperatingOrder::all()->count();
 
         $shipOrders = ShipOrderData::all();
         $shipOrderCount = $shipOrders->count();
@@ -669,6 +671,7 @@ class ReportsController extends Controller
             'shipOrders' => $shipOrderCount,
             'shiplines' => $shiplines,
             'destinations' => $destinations,
+            'opertatingOrders' => $opertatingOrders,
             'todayShipOrders' => $todayShipOrders,
             'yesterdayShipOrders' => $yesterdayShipOrders,
             'todayShipOrdersCount' => $todayShipOrders->count(),
