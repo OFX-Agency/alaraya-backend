@@ -2,6 +2,8 @@
 
 Implemented 2026-10-10. All endpoints below use the `/api` prefix and the existing Sanctum authentication. This repository contains the backend; implement these UI changes in the consuming frontend.
 
+For ongoing frontend maintenance, submission recovery, cache refreshes, and regression checks, see the [frontend receipts maintenance guide](frontend-receipts-maintenance.md), based on commit `3435089e2c2974cf84485923d51e645645468b00`.
+
 ## Behavior
 
 Add an **إيصالات الأوردر** section to shipping-order details. It must be usable before any transport policies exist and remain usable afterward. Keep **إيصالات النقل** as a separate section requiring a policy. Creating a policy does not move, duplicate, or charge existing order receipts.
