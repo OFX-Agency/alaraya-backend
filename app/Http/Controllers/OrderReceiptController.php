@@ -52,7 +52,7 @@ class OrderReceiptController extends Controller
             'notes' => 'nullable|string|max:2000',
             'items' => ($creating ? 'required' : 'sometimes|required').'|array|min:1|max:100',
             'items.*' => 'required|array:category,description,amount',
-            'items.*.category' => ['required', Rule::in(array_keys(OrderReceiptItem::CATEGORIES))],
+            'items.*.category' => ['required', 'string'],
             'items.*.description' => 'nullable|string|max:500',
             'items.*.amount' => ['required', 'numeric', 'min:0.01', 'max:9999999999999.99', 'regex:/^[0-9]{1,13}(\.[0-9]{1,2})?$/'],
             'policy_id' => 'prohibited', 'total' => 'prohibited', 'status' => 'prohibited',
