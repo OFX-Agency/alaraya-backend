@@ -24,6 +24,11 @@ class OperatingOrderController extends Controller
             $query = OperatingOrder::query()->with([
                 'shipOrderData',
                 'shipOrderData.policies',
+                // Booking number (export) / inbound bill of lading number (import) and the
+                // treasuries the order is charged to, shown in the executed-orders table.
+                'shipOrderData.shipBookings:id,ship_order_data_id,booking_number',
+                'shipOrderData.shipPolicies:id,ship_order_data_id,policy_number',
+                'shipOrderData.treasuries:id,name,is_main',
                 'drivers.driver',
                 'vehicles.vehicle',
                 'torrentContainers.container',
@@ -41,6 +46,15 @@ class OperatingOrderController extends Controller
                     $q->where('id', 'like', "%{$search}%")
                         ->orWhereHas('shipOrderData', function ($q) use ($search) {
                             $q->where('order_number', 'like', "%{$search}%");
+                        })
+                        ->orWhereHas('shipOrderData.shipBookings', function ($q) use ($search) {
+                            $q->where('booking_number', 'like', "%{$search}%");
+                        })
+                        ->orWhereHas('shipOrderData.shipPolicies', function ($q) use ($search) {
+                            $q->where('policy_number', 'like', "%{$search}%");
+                        })
+                        ->orWhereHas('shipOrderData.policies', function ($q) use ($search) {
+                            $q->where('policy_number', 'like', "%{$search}%");
                         })
                         ->orWhereHas('shipOrderData.shipLineClients.client', function ($q) use ($search) {
                             $q->where('client_name', 'like', "%{$search}%");

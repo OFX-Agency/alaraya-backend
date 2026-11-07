@@ -30,7 +30,7 @@ class AuditReceipts extends Command
         });
         $this->line(json_encode(['transport_receipts' => $rows,
             'duplicate_policy_links' => DB::table('transport_receipts')->select('policy_id', DB::raw('COUNT(*) AS receipt_count'))
-                ->whereNotNull('policy_id')->groupBy('policy_id')->havingRaw('COUNT(*) > 1')->get(),
+                ->whereNotNull('policy_id')->whereNull('cancelled_at')->groupBy('policy_id')->havingRaw('COUNT(*) > 1')->get(),
             'unlinked_receipt_deductions' => DB::table('treasury_deductions')->whereNull('transport_receipt_id')->whereNull('order_receipt_id')
                 ->where('type', 'like', '%receipt%')->get(['id', 'treasury_id', 'type', 'amount', 'reason', 'created_at']),
             'treasury_balances' => DB::table('treasuries')->get(['id', 'balance']),

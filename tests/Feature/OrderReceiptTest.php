@@ -157,12 +157,83 @@ class OrderReceiptTest extends TestCase
     {
         $id = $this->postJson('/api/order-receipts', $this->payload())->assertCreated()->json('data.id');
         $user = User::create(['full_name' => 'Other', 'user_name' => 'other', 'email' => 'other@example.test', 'password' => 'password', 'phone_number' => '2']);
+        // Has module access by role, but is not assigned to the receipt's treasury.
+        $user->assignRole('مدير حسابات');
         $this->actingAs($user);
         $this->getJson('/api/order-receipts/'.$id)->assertForbidden();
         $this->getJson('/api/order-receipts')->assertOk()->assertJsonPath('data.total', 0);
         $this->postJson('/api/order-receipts', $this->payload())->assertForbidden();
         $this->patchJson('/api/order-receipts/'.$id, ['notes' => 'Forbidden'])->assertForbidden();
         $this->postJson('/api/order-receipts/'.$id.'/cancel', ['reason' => 'Forbidden'])->assertForbidden();
+    }
+
+    private function userWithRole(?string $role, string $name): User
+    {
+        $user = User::create(['full_name' => $name, 'user_name' => $name, 'email' => $name.'@example.test',
+            'password' => 'password', 'phone_number' => '3'.crc32($name)]);
+        if ($role) {
+            Role::findOrCreate($role, 'web');
+            $user->assignRole($role);
+        }
+        $user->treasuries()->attach($this->treasury);
+
+        return $user;
+    }
+
+    public static function moduleRoles(): array
+    {
+        return ['account manager' => ['مدير حسابات'], 'port supervisor' => ['مشرف ميناء']];
+    }
+
+    /** @dataProvider moduleRoles */
+    public function test_account_managers_and_supervisors_can_view_and_create_but_not_edit_or_cancel(string $role): void
+    {
+        $existing = $this->postJson('/api/order-receipts', $this->payload())->assertCreated()->json('data.id');
+        $this->actingAs($this->userWithRole($role, 'module-user'));
+
+        // Pages' API calls: permit list + permit details, categories, list, details, create.
+        $this->getJson('/api/ship-order-data')->assertOk()->assertJsonPath('data.data.0.id', $this->order->id);
+        $this->getJson('/api/ship-order-data/'.$this->order->id)->assertOk();
+        $this->getJson('/api/order-receipts/categories')->assertOk();
+        $this->getJson('/api/order-receipts')->assertOk()->assertJsonPath('data.total', 1);
+        $this->getJson('/api/order-receipts/'.$existing)->assertOk();
+        $created = $this->postJson('/api/order-receipts', $this->payload())->assertCreated()->json('data.id');
+        $this->getJson('/api/order-receipts/'.$created)->assertOk();
+
+        // Edit and cancel stay admin-only.
+        $this->patchJson('/api/order-receipts/'.$created, ['notes' => 'x'])->assertForbidden();
+        $this->postJson('/api/order-receipts/'.$created.'/cancel', ['reason' => 'x'])->assertForbidden();
+        $this->assertEquals('799.50', $this->treasury->fresh()->balance);
+    }
+
+    public function test_unrelated_roles_are_denied_even_with_treasury_access(): void
+    {
+        $id = $this->postJson('/api/order-receipts', $this->payload())->assertCreated()->json('data.id');
+        foreach (['مندوب تشغيل' => 'field-rep', null => 'no-role-user'] as $role => $name) {
+            $this->actingAs($this->userWithRole($role ?: null, $name));
+            $this->getJson('/api/order-receipts/categories')->assertForbidden();
+            $this->getJson('/api/order-receipts')->assertForbidden();
+            $this->getJson('/api/order-receipts/'.$id)->assertForbidden();
+            $this->postJson('/api/order-receipts', $this->payload())->assertForbidden();
+            $this->patchJson('/api/order-receipts/'.$id, ['notes' => 'x'])->assertForbidden();
+            $this->postJson('/api/order-receipts/'.$id.'/cancel', ['reason' => 'x'])->assertForbidden();
+        }
+        $this->assertEquals('899.75', $this->treasury->fresh()->balance);
+    }
+
+    public function test_permission_migration_is_idempotent(): void
+    {
+        $migration = require base_path('database/migrations/2026_11_07_000002_grant_order_receipt_permissions.php');
+        $migration->up();
+        $this->seed(\Database\Seeders\RolesSeeder::class);
+        $migration->up();
+        $this->assertSame(1, Role::where('name', 'مشرف ميناء')->count());
+        $this->assertSame(1, Role::where('name', 'مدير حسابات')->count());
+        $names = \Spatie\Permission\Models\Permission::where('name', 'like', '% order_receipts')->pluck('name');
+        $this->assertSame($names->count(), $names->unique()->count());
+        $this->assertTrue($names->contains('update order_receipts'));
+        $this->assertEqualsCanonicalizing(['view_any order_receipts', 'view order_receipts', 'create order_receipts'],
+            Role::findByName('مشرف ميناء', 'web')->permissions->pluck('name')->all());
     }
 
     private function policy(): Policy
@@ -191,6 +262,31 @@ class OrderReceiptTest extends TestCase
         $this->assertEquals('989.75', $this->treasury->fresh()->balance);
         $this->assertEquals(2, TransportReceipt::count());
         $this->getJson('/api/reports/client-account-statements')->assertOk()->assertJsonPath('data.total_sum_transport_receipts', 10.25);
+    }
+
+    public function test_deleting_transport_receipt_refunds_treasury_hides_it_and_allows_reissue(): void
+    {
+        $policy = $this->policy();
+        $payload = ['ship_order_id' => $this->order->id, 'policy_id' => $policy->id, 'port_receipts' => '40.50'];
+        $id = $this->postJson('/api/transport-receipts', $payload)->assertCreated()->json('data.id');
+        $this->assertEquals('959.50', $this->treasury->fresh()->balance);
+
+        // Reason is optional; the delete reverses the treasury effect once.
+        $this->deleteJson('/api/transport-receipts/'.$id)->assertOk();
+        $this->deleteJson('/api/transport-receipts/'.$id)->assertOk();
+        $this->assertEquals('1000.00', $this->treasury->fresh()->balance);
+        $deductions = TreasuryDeduction::where('transport_receipt_id', $id)->orderBy('id')->get();
+        $this->assertSame(['transport_receipt', 'transport_receipt_reversal'], $deductions->pluck('type')->all());
+        $this->assertEquals(0, $deductions->sum('amount'));
+        $this->assertSame('مسح الإيصال', TransportReceipt::find($id)->cancellation_reason);
+
+        $this->getJson('/api/transport-receipts')->assertOk()->assertJsonCount(0, 'data');
+        $this->getJson('/api/transport-receipts?include_cancelled=1')->assertOk()->assertJsonCount(1, 'data');
+
+        // A new receipt can be issued for the policy after the old one was deleted.
+        $this->postJson('/api/transport-receipts', array_replace($payload, ['port_receipts' => '15.00']))->assertCreated();
+        $this->postJson('/api/transport-receipts', $payload)->assertStatus(409);
+        $this->assertEquals('985.00', $this->treasury->fresh()->balance);
     }
 
     public function test_legacy_mapping_is_dry_run_safe_and_idempotent(): void

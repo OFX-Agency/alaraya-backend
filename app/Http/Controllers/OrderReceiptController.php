@@ -14,14 +14,28 @@ use Illuminate\Validation\ValidationException;
 
 class OrderReceiptController extends Controller
 {
-    public function categories()
+    /**
+     * Module access ("إيصالات ومصروفات الأذن"): admin, or a role holding the
+     * "{action} order_receipts" permission (granted to مدير حسابات / مشرف ميناء
+     * for view_any, view and create). Treasury scoping still applies on top.
+     */
+    private function authorizeAction(Request $request, string $action): void
     {
+        $user = $request->user();
+        abort_unless($user->hasRole('admin') || $user->can("{$action} order_receipts"), 403);
+    }
+
+    public function categories(Request $request)
+    {
+        $this->authorizeAction($request, 'view_any');
+
         return response()->json(['success' => true, 'data' => collect(OrderReceiptItem::CATEGORIES)
             ->map(fn ($label, $code) => ['code' => $code, 'label' => $label])->values()]);
     }
 
     public function index(Request $request)
     {
+        $this->authorizeAction($request, 'view_any');
         $filters = $request->validate(['ship_order_id' => 'sometimes|integer', 'client_id' => 'sometimes|integer',
             'status' => 'sometimes|in:posted,cancelled', 'per_page' => 'sometimes|integer|min:1|max:100']);
         $query = OrderReceipt::with('items', 'client', 'treasury');
@@ -39,6 +53,7 @@ class OrderReceiptController extends Controller
 
     public function show(Request $request, $id)
     {
+        $this->authorizeAction($request, 'view');
         $receipt = OrderReceipt::findOrFail($id);
         Money::authorizeTreasury($request->user(), $receipt->treasury_id);
 
@@ -92,6 +107,7 @@ class OrderReceiptController extends Controller
 
     public function store(Request $request)
     {
+        $this->authorizeAction($request, 'create');
         $data = $this->validateReceipt($request, true);
         Money::authorizeTreasury($request->user(), $data['treasury_id']);
         // Canonical payload avoids JSON object key order affecting retries.
@@ -129,6 +145,7 @@ class OrderReceiptController extends Controller
 
     public function update(Request $request, $id)
     {
+        $this->authorizeAction($request, 'update');
         $data = $this->validateReceipt($request, false);
         $original = OrderReceipt::findOrFail($id);
         Money::authorizeTreasury($request->user(), $original->treasury_id);

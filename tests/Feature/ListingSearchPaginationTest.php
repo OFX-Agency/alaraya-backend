@@ -210,4 +210,58 @@ class ListingSearchPaginationTest extends TestCase
             );
         }
     }
+
+    public function test_booking_and_inbound_bill_search_treasury_and_vehicle_type_filter(): void
+    {
+        $treasury = \App\Models\Treasury::create(['name' => 'خزنة الميناء', 'balance' => '0.00']);
+        $officeCar = Vehicle::create(['vehicle_number' => 'OFFICE-1', 'type' => 'office']);
+        $privateCar = Vehicle::create(['vehicle_number' => 'PRIVATE-1', 'type' => 'private']);
+        $driver = Drivers::create(['driver_name' => 'Driver', 'phone_number' => '01000000002',
+            'identification_number' => '12345678901235', 'license_number' => 'LICENSE-2']);
+
+        $orders = [];
+        foreach (['EXP-1' => $officeCar, 'IMP-1' => $privateCar] as $number => $car) {
+            $order = ShipOrderData::create(['order_number' => $number, 'order_type' => 'import', 'noloans' => 100]);
+            $order->treasuries()->attach($treasury);
+            $operatingOrder = OperatingOrder::create(['ship_order_data_id' => $order->id]);
+            $policy = Policy::create(['ship_order_data_id' => $order->id, 'operating_order_id' => $operatingOrder->id]);
+            VehicleDriverAssignment::create(['policy_id' => $policy->id, 'driver_id' => $driver->id, 'vehicle_id' => $car->id]);
+            $orders[$number] = $order;
+        }
+        \App\Models\ShipBooking::create(['ship_order_data_id' => $orders['EXP-1']->id, 'booking_number' => 'BK-777']);
+        \App\Models\ShipPolicy::create(['ship_order_data_id' => $orders['IMP-1']->id, 'policy_number' => 'BL-888']);
+
+        // Executed matters / work orders: search and returned booking, bill and treasury.
+        $this->getJson('/api/operating-orders?search=BK-777')
+            ->assertOk()
+            ->assertJsonPath('total', 1)
+            ->assertJsonPath('data.0.ship_order_data.ship_bookings.0.booking_number', 'BK-777')
+            ->assertJsonPath('data.0.ship_order_data.treasuries.0.name', 'خزنة الميناء');
+        $this->getJson('/api/operating-orders?search=BL-888')
+            ->assertOk()
+            ->assertJsonPath('total', 1)
+            ->assertJsonPath('data.0.ship_order_data.ship_policies.0.policy_number', 'BL-888');
+
+        // Torrents and vehicles reports: permit, booking or inbound bill number.
+        foreach (['torrents', 'vehicle'] as $report) {
+            $this->getJson("/api/reports/{$report}/BK-777")->assertOk()
+                ->assertJsonCount(1, 'ship_orders_data')
+                ->assertJsonPath('ship_orders_data.0.order_number', 'EXP-1');
+            $this->getJson("/api/reports/{$report}/BL-888")->assertOk()
+                ->assertJsonPath('ship_orders_data.0.order_number', 'IMP-1');
+            $this->getJson("/api/reports/{$report}/IMP-1")->assertOk()
+                ->assertJsonPath('ship_orders_data.0.order_number', 'IMP-1');
+            $this->getJson("/api/reports/{$report}/NOPE")->assertNotFound();
+        }
+
+        // Car account statement: office vs private filter.
+        $this->getJson('/api/reports/vehicle-statements?vehicle_type=office')->assertOk()
+            ->assertJsonPath('pagination.total', 1)
+            ->assertJsonPath('data.0.order_number', 'EXP-1');
+        $this->getJson('/api/reports/vehicle-statements?vehicle_type=private')->assertOk()
+            ->assertJsonPath('pagination.total', 1)
+            ->assertJsonPath('data.0.order_number', 'IMP-1');
+        $this->getJson('/api/reports/vehicle-statements')->assertOk()
+            ->assertJsonPath('pagination.total', 2);
+    }
 }

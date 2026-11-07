@@ -14,19 +14,33 @@ use App\Models\OperatingOrder;
 
 class ReportsController extends Controller
 {
+    /**
+     * Match ship orders by permit number (رقم الإذن), booking number (رقم البوكنج)
+     * or inbound bill of lading number (بوليصة الوارد).
+     */
+    private function shipOrdersMatching(string $searchValue)
+    {
+        $searchValue = trim($searchValue);
+
+        return ShipOrderData::query()->where(function ($q) use ($searchValue) {
+            $q->where('order_number', 'LIKE', "%{$searchValue}%")
+                ->orWhereHas('shipBookings', fn ($b) => $b->where('booking_number', 'LIKE', "%{$searchValue}%"))
+                ->orWhereHas('shipPolicies', fn ($p) => $p->where('policy_number', 'LIKE', "%{$searchValue}%"));
+        });
+    }
+
     public function vehicleReport($number)
     {
         try {
             $searchValue = $number;
 
             // Check if ship order exists
-            $shipOrder = ShipOrderData::where('order_number', 'LIKE', "%{$searchValue}%")->first();
+            $shipOrder = $this->shipOrdersMatching($searchValue)->first();
             if (!$shipOrder) {
                 return response()->json(['error' => 'Ship order not found'], 404);
             }
 
-            $report = ShipOrderData::query()
-                ->where('order_number', 'LIKE', "%{$searchValue}%")
+            $report = $this->shipOrdersMatching($searchValue)
                 ->with('operatingOrder')
                 ->with('operatingOrder.vehicles.vehicle')
                 ->with('operatingOrder.drivers.driver')
@@ -53,13 +67,12 @@ class ReportsController extends Controller
         try {
             $searchValue = $number;
             // Check if ship order exists
-            $shipOrder = ShipOrderData::where('order_number', 'LIKE', "%{$searchValue}%")->first();
+            $shipOrder = $this->shipOrdersMatching($searchValue)->first();
             if (!$shipOrder) {
                 return response()->json(['error' => 'Ship order not found'], 404);
             }
 
-            $report = ShipOrderData::query()
-                ->where('order_number', 'LIKE', "%{$searchValue}%")
+            $report = $this->shipOrdersMatching($searchValue)
                 ->with('policies.vehicleDriverAssignments.shipContainers.torrentContainers')
                 ->with('operatingOrder')
                 ->with('operatingOrder.torrentContainers.container')
@@ -396,13 +409,17 @@ class ReportsController extends Controller
             $fromDate = $request->filled('from_date') ? $request->input('from_date') : null;
             $toDate = $request->filled('to_date') ? $request->input('to_date') : null;
             $vehicleNumber = $request->filled('vehicle_number') ? $request->input('vehicle_number') : null;
+            // Car ownership: office-owned (مكتب) or private (خاص). Unknown values are ignored.
+            $vehicleType = in_array($request->input('vehicle_type'), ['office', 'private'], true)
+                ? $request->input('vehicle_type')
+                : null;
             $search = $request->filled('search') ? trim($request->query('search')) : null;
 
             // Pick which date column to range on: if the caller told us cleared/not-cleared,
             // use the column that makes sense for that state. Otherwise default to created_at.
             $dateColumn = $isCleared === true ? 'clearance_date' : 'created_at';
 
-            $applyFilters = function ($query) use ($isCleared, $fromDate, $toDate, $vehicleNumber, $dateColumn) {
+            $applyFilters = function ($query) use ($isCleared, $fromDate, $toDate, $vehicleNumber, $vehicleType, $dateColumn) {
                 if (!is_null($isCleared)) {
                     if ($isCleared === true) {
                         $query->whereNotNull('clearance_date');
@@ -420,6 +437,12 @@ class ReportsController extends Controller
                         $q->where('vehicle_number', 'like', "%{$vehicleNumber}%");
                     });
                 }
+
+                if ($vehicleType) {
+                    $query->whereHas('vehicleDriverAssignments.vehicle', function ($q) use ($vehicleType) {
+                        $q->where('type', $vehicleType);
+                    });
+                }
             };
 
             $query = ShipOrderData::with([
@@ -429,7 +452,8 @@ class ReportsController extends Controller
                     $query->with([
                         'user',
                         'settled_user',
-                        'transportReceipts',
+                        // Deleted (cancelled) receipts must not appear in the statement.
+                        'transportReceipts' => fn ($q) => $q->whereNull('cancelled_at')->whereNull('migrated_to_order_receipt_at'),
                         'vehicleDriverAssignments',
                         'vehicleDriverAssignments.vehicle',
                         'vehicleDriverAssignments.driver',

@@ -25,7 +25,8 @@ class RolesSeeder extends Seeder
         $dataEntryRole = Role::firstOrCreate(['name' => 'مدير تنفيذ']);
         $dataEntryRole = Role::firstOrCreate(['name' => 'مندوب تشغيل']);
         $dataEntryRole = Role::firstOrCreate(['name' => 'محاسب']);
-        $dataEntryRole = Role::firstOrCreate(['name' => 'مدير حسابات']);
+        $accountManagerRole = Role::firstOrCreate(['name' => 'مدير حسابات']);
+        $portSupervisorRole = Role::firstOrCreate(['name' => 'مشرف ميناء']);
 
         // System models
         $models = [
@@ -41,7 +42,8 @@ class RolesSeeder extends Seeder
             'policies',
             'reports',
             'transport_receipts',
-            'treasury'
+            'treasury',
+            'order_receipts',
         ];
 
         // CRUD + extra system actions
@@ -71,6 +73,12 @@ class RolesSeeder extends Seeder
 
         // Admin gets all permissions
         $adminRole->syncPermissions($permissions);
+
+        // إيصالات ومصروفات الأذن: Account Managers and Port Supervisors may view and create.
+        // Editing stays admin-only; cancelling is restricted to the admin role in the controller.
+        foreach ([$accountManagerRole, $portSupervisorRole] as $role) {
+            $role->givePermissionTo(['view_any order_receipts', 'view order_receipts', 'create order_receipts']);
+        }
 
         // Create default admin user safely
         $adminUser = User::firstOrCreate(

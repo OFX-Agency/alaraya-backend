@@ -15,7 +15,12 @@ class TransportReceiptController extends Controller
 {
     public function index(Request $request)
     {
-        $query = TransportReceipt::with('shipOrder', 'policy')->whereNull('migrated_to_order_receipt_at');
+        $query = TransportReceipt::with('shipOrder', 'policy', 'policy.vehicleDriverAssignments.vehicle', 'policy.vehicleDriverAssignments.driver')
+            ->whereNull('migrated_to_order_receipt_at');
+        // Deleted (cancelled + refunded) receipts stay as financial history but are hidden from the list.
+        if (! $request->boolean('include_cancelled')) {
+            $query->whereNull('cancelled_at');
+        }
         if (! $request->user()->hasRole('admin')) {
             $ids = $request->user()->treasuries()->pluck('treasuries.id');
             $query->where(function ($q) use ($ids) {
@@ -69,7 +74,8 @@ class TransportReceiptController extends Controller
             $order = ShipOrderData::lockForUpdate()->findOrFail($data['ship_order_id']);
             $policy = Policy::lockForUpdate()->findOrFail($data['policy_id']);
             abort_if($policy->ship_order_data_id != $order->id, 409, 'Policy order changed.');
-            abort_if($policy->settled || $policy->transportReceipts()->exists(), 409, 'Policy is settled or already has a receipt.');
+            // A deleted (cancelled + refunded) receipt no longer blocks issuing a new one for the policy.
+            abort_if($policy->settled || $policy->transportReceipts()->whereNull('cancelled_at')->exists(), 409, 'Policy is settled or already has a receipt.');
             $treasuryId = $data['treasury_id'] ?? $order->treasuries()->value('treasuries.id');
             if (! $treasuryId || ! $order->treasuries()->where('treasuries.id', $treasuryId)->exists()) {
                 throw ValidationException::withMessages(['treasury_id' => 'Choose a treasury associated with this order.']);
@@ -120,11 +126,14 @@ class TransportReceiptController extends Controller
         }, 3);
     }
 
-    // Backwards-compatible DELETE route now cancels and refunds, retaining the record.
+    // DELETE ("مسح الإيصال") cancels and refunds the original treasury in one transaction.
+    // The record and a signed reversal deduction are retained as financial history and the
+    // receipt is hidden from the receipts list.
     public function destroy(Request $request, $id)
     {
         abort_unless($request->user()->hasRole('admin'), 403);
-        $data = $request->validate(['reason' => 'required|string|max:2000']);
+        $data = $request->validate(['reason' => 'nullable|string|max:2000']);
+        $data['reason'] = trim((string) ($data['reason'] ?? '')) ?: 'مسح الإيصال';
         $original = TransportReceipt::findOrFail($id);
 
         return DB::transaction(function () use ($request, $id, $data, $original) {
