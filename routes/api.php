@@ -38,7 +38,11 @@ Route::middleware('auth:sanctum')->group(function () {
 
     Route::prefix('auth')->group(function () {
         Route::get('/user', function (Request $request) {
-            return response()->json($request->user()->load('roles', 'permissions', 'treasuries'));
+            $user = $request->user()->load('roles', 'permissions', 'treasuries');
+            // Effective permissions (role + direct) so the frontend can gate permission-based actions.
+            $user->setAttribute('all_permissions', $user->getAllPermissions()->pluck('name')->values());
+
+            return response()->json($user);
         });
 
         Route::get('/users', [AuthController::class, 'getUsers']);
@@ -53,6 +57,8 @@ Route::middleware('auth:sanctum')->group(function () {
             Route::get('/roles', [RolePermissionController::class, 'roles']);
 
             Route::get('/permissions', [RolePermissionController::class, 'permissions']);
+
+            Route::put('/roles/{id}/permissions', [RolePermissionController::class, 'updateRolePermissions']);
         });
     });
 
