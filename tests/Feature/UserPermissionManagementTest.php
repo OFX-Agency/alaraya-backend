@@ -83,8 +83,13 @@ class UserPermissionManagementTest extends TestCase
         $member = $this->makeUser('member', 'محاسب');
         $this->assertFalse($member->can('view_any order_receipts'));
 
-        $this->getJson('/api/auth/roles-permissions/roles')->assertOk()
-            ->assertJsonStructure(['data' => [['id', 'name', 'permissions']]]);
+        $roles = collect($this->getJson('/api/auth/roles-permissions/roles')->assertOk()
+            ->assertJsonStructure(['data' => [['id', 'name', 'permissions' => [['id', 'name']]]]])
+            ->json('data'))->keyBy('name');
+        // Each role comes back with the permissions it currently grants (shown checked in the editor).
+        $this->assertEqualsCanonicalizing(['view_any order_receipts', 'view order_receipts', 'create order_receipts'],
+            collect($roles['مشرف ميناء']['permissions'])->pluck('name')->all());
+        $this->assertCount(\Spatie\Permission\Models\Permission::count(), $roles['admin']['permissions']);
 
         $this->putJson("/api/auth/roles-permissions/roles/{$role->id}/permissions", [
             'permissions' => ['view_any order_receipts', 'view order_receipts', 'create order_receipts'],
