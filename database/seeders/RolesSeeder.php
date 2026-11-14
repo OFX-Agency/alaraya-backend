@@ -80,6 +80,9 @@ class RolesSeeder extends Seeder
             $role->givePermissionTo(['view_any order_receipts', 'view order_receipts', 'create order_receipts']);
         }
 
+        // Account Managers may delete ship orders (receipt history still blocks deletion).
+        $accountManagerRole->givePermissionTo('delete ship_order_data');
+
         // Create default admin user safely
         $adminUser = User::firstOrCreate(
             ['email' => 'admin@alraya.com'],

@@ -618,10 +618,16 @@ class ShipOrderDataController extends Controller
         $user = auth()->user();
         try {
 
-            if (!$user->hasRole('admin')) {
+            // Admin, or a role/user holding "delete ship_order_data" (granted to مدير حسابات).
+            if (!($user->hasRole('admin') || $user->can('delete ship_order_data'))) {
                 return response()->json(['error' => 'Unauthorized'], 403);
             }
             $shipOrderData = ShipOrderData::findOrFail($id);
+            // Non-admins may only delete orders they can see (same treasury scoping as the list).
+            if (!$user->hasRole('admin') && !$user->can('view_any ship_order_data')
+                && !$shipOrderData->treasuries()->whereIn('treasuries.id', $user->treasuries()->pluck('treasuries.id'))->exists()) {
+                return response()->json(['error' => 'Unauthorized'], 403);
+            }
             if ($shipOrderData->orderReceipts()->exists() || $shipOrderData->transportReceipt()->exists()) {
                 return response()->json(['message' => 'Orders with receipt history cannot be deleted.'], 409);
             }

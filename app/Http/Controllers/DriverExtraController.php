@@ -96,6 +96,8 @@ class DriverExtraController extends Controller
      */
     public function update(Request $request, string $id)
     {
+        // Matches the UI: only admins can edit driver additions.
+        abort_unless($request->user()?->hasRole('admin'), 403);
         try {
             $extra = DriverExtra::findOrFail($id);
             $validatedData = $request->validate([
@@ -116,8 +118,10 @@ class DriverExtraController extends Controller
     /**
      * Remove the specified resource from storage.
      */
-    public function destroy(string $id)
+    public function destroy(Request $request, string $id)
     {
+        // Matches the UI: only admins can delete driver additions.
+        abort_unless($request->user()?->hasRole('admin'), 403);
         try {
             $extra = DriverExtra::findOrFail($id);
 
