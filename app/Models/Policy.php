@@ -4,13 +4,15 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\SoftDeletes;
 use Spatie\Activitylog\LogOptions;
 use Spatie\Activitylog\Models\Activity;
 use Spatie\Activitylog\Traits\LogsActivity;
 
 class Policy extends Model
 {
-    use HasFactory, LogsActivity;
+    // Deleted policies are soft-deleted and hidden from every query by default.
+    use HasFactory, LogsActivity, SoftDeletes;
 
     protected $fillable = [
         'user_id',
@@ -75,7 +77,8 @@ class Policy extends Model
 
     public static function generatePolicyNumber()
     {
-        $lastPolicy = static::lockForUpdate()
+        // Include deleted policies so a deleted policy's number is never reused (it stays unique).
+        $lastPolicy = static::withTrashed()->lockForUpdate()
             ->orderByDesc('id')
             ->first();
 

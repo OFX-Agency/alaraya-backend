@@ -6,6 +6,8 @@ use App\Models\Policy;
 use App\Models\ShipOrderData;
 use App\Models\VehicleDriverAssignment;
 use App\Models\TreasuryDeduction;
+use App\Models\TransportReceipt;
+use App\Services\ReceiptAccounting as Money;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -405,15 +407,43 @@ class PolicyController extends Controller
         if (!$user->hasRole('admin')) {
             return response()->json(['error' => 'Unauthorized'], 403);
         }
-        $policy = Policy::findOrFail($id);
-        if ($policy->transportReceipts()->exists()) return response()->json(['message' => 'Policies with receipt history cannot be deleted.'], 409);
+        $policy = Policy::find($id);
+        if (!$policy) {
+            return response()->json(['message' => 'البوليصة غير موجودة أو تم حذفها بالفعل.'], 404);
+        }
         try {
             DB::beginTransaction();
-            $policy = Policy::lockForUpdate()->findOrFail($id);
-            if ($policy->transportReceipts()->exists()) {
+            // Lock order used by every receipt flow: order, then policy/receipts, then treasury.
+            ShipOrderData::lockForUpdate()->find($policy->ship_order_data_id);
+            $policy = Policy::lockForUpdate()->find($id);
+            if (!$policy) {
                 DB::rollBack();
-                return response()->json(['message' => 'Policies with receipt history cannot be deleted.'], 409);
+                return response()->json(['message' => 'البوليصة غير موجودة أو تم حذفها بالفعل.'], 404);
             }
+
+            // Delete the policy's transport receipts together with it: each active receipt is
+            // reversed into the treasury it was charged to, then cancelled (hidden from lists).
+            $receipts = TransportReceipt::where('policy_id', $policy->id)
+                ->whereNull('cancelled_at')->whereNull('migrated_to_order_receipt_at')
+                ->lockForUpdate()->get();
+            if ($receipts->isNotEmpty() && $policy->settled) {
+                DB::rollBack();
+                return response()->json(['message' => 'لا يمكن حذف بوليصة تمت تصفيتها ولها إيصالات نقل.'], 409);
+            }
+            if ($receipts->contains(fn ($receipt) => !$receipt->treasury_id)) {
+                DB::rollBack();
+                return response()->json(['message' => 'للبوليصة إيصال نقل قديم غير مرتبط بخزنة، ويجب تسويته يدوياً قبل الحذف.'], 409);
+            }
+            $reversedCents = 0;
+            foreach ($receipts as $receipt) {
+                $cents = array_sum(array_map(fn ($value) => Money::cents($value), $receipt->only(TransportReceipt::EXPENSE_FIELDS)));
+                Money::post($receipt->treasury_id, -$cents, $user, ['transport_receipt_id' => $receipt->id, 'type' => 'transport_receipt_reversal'],
+                    'إلغاء إيصال النقل #'.$receipt->id.' بسبب حذف البوليصة #'.$policy->policy_number);
+                $receipt->update(['cancelled_at' => now(), 'cancelled_by' => $user->id,
+                    'cancellation_reason' => 'حذف البوليصة #'.$policy->policy_number]);
+                $reversedCents += $cents;
+            }
+
             $treasury = $policy->shipOrderData->treasuries()->lockForUpdate()->first();
             // Refund covenant amount to treasury if applicable
             if ($treasury && $policy->covenant_amount > 0) {
@@ -435,13 +465,22 @@ class PolicyController extends Controller
 
             DB::commit();
             return response()->json([
-                'message' => 'Policy and related vehicle assignments deleted successfully'
+                'message' => 'Policy and related vehicle assignments deleted successfully',
+                'reversed_receipts' => $receipts->count(),
+                'reversed_amount' => Money::decimal($reversedCents),
             ]);
+        } catch (ValidationException $e) {
+            DB::rollBack();
+            return response()->json(['message' => collect($e->errors())->flatten()->first() ?? $e->getMessage(), 'errors' => $e->errors()], 422);
+        } catch (\Symfony\Component\HttpKernel\Exception\HttpExceptionInterface $e) {
+            DB::rollBack();
+            return response()->json(['message' => $e->getMessage() ?: 'غير مصرح بهذه العملية.'], $e->getStatusCode());
         } catch (\Exception $e) {
             DB::rollBack();
+            \Log::error('Policy delete failed', ['policy_id' => $id, 'message' => $e->getMessage()]);
             return response()->json([
                 'error' => 'Failed to delete policy',
-                'message' => $e->getMessage(),
+                'message' => 'تعذر حذف البوليصة، لم يتم تنفيذ أي تغيير. حاول مرة أخرى.',
             ], 500);
         }
     }

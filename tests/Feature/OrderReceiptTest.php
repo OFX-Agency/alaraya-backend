@@ -256,7 +256,7 @@ class OrderReceiptTest extends TestCase
         $this->patchJson('/api/transport-receipts/'.$id, ['port_receipts' => '20.00'])->assertOk();
         $this->assertEquals('969.75', $this->treasury->fresh()->balance);
         $this->assertEquals(3, TreasuryDeduction::count());
-        $this->deleteJson('/api/policies/'.$policy->id)->assertStatus(409);
+        // Deleting a policy now reverses its receipts (covered in PolicyDeleteTest).
         $this->deleteJson('/api/transport-receipts/'.$id, ['reason' => 'Cancelled'])->assertOk();
         $this->deleteJson('/api/transport-receipts/'.$id, ['reason' => 'Retry'])->assertOk();
         $this->assertEquals('989.75', $this->treasury->fresh()->balance);
